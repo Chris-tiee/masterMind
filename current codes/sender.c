@@ -6,11 +6,11 @@
 #include <templateEMP.h>
 
 //Communication pins
-#define CLK_PIN   BIT0      // P1.0
-#define DATA_PIN1  BIT3      // P1.3
-#define DATA_PIN2  BIT4      // P1.4
+#define STROBE      BIT0    // P1.0  (reuse your CLK pin as STROBE)
+#define DATA_PIN1   BIT3    // P1.3
+#define DATA_PIN2   BIT4    // P1.4
 
-#define button5   BIT7    // P1.7
+#define button5     BIT7    // P1.7
 
 #define LED_STATUS   BIT0       // Yellow   LED on P3.0 to right pin of JP3
 #define LED_WINNER  BIT1        // Green    LED on P3.1 to K4
@@ -38,11 +38,6 @@ volatile int pass[4] = {1,2,3,4}; //to hold the sequence/
 //The secret sequence will be a permutation of these four numbers
 //These numbers represent the push buttons PB1/PB2/PB3/PB4 respectively
 
-//This will be used to set the state of the data pins sent
-//So technically it holds the value of the data pins sent
-//Basically I only use it to avoid changing P1OUT directly all the time
-//It will hold the values of DATA_PIN1 and DATA_PIN2
-unsigned char alpha = 0; //to set the state of the data pins sent
 volatile int counter = 0; //to loop over the sequence only used to send and initialize the sequence
 
 volatile int waiting = 1; //to indicate when we are waiting for the players to be ready
@@ -58,16 +53,16 @@ volatile int won1 = 0; //to indicate if player 1 has won or not
 volatile int won2 = 0; //to indicate if player 2 has won or not
 
 //To initialize a random permutation of 4 numbers
-void shuffle4(){
-    // i = 3
-    int j = rand() % 4;
-    int t = pass[3]; pass[3] = pass[j]; pass[j] = t;
+static void shuffle4(void)
+{
+    int j, t;
 
-    // i = 2
+    j = rand() % 4;
+    t = pass[3]; pass[3] = pass[j]; pass[j] = t;
+
     j = rand() % 3;
     t = pass[2]; pass[2] = pass[j]; pass[j] = t;
 
-    // i = 1
     j = rand() % 2;
     t = pass[1]; pass[1] = pass[j]; pass[j] = t;
 
@@ -78,33 +73,46 @@ void shuffle4(){
     serialPrintln(" ");
 }
 
-//Function to send one pair of bits (bit1, bit2) through DATA_PIN1 and DATA_PIN2
-void send_bits(){
-    P1OUT = alpha;
-    __delay_cycles(1000);    // small setup time (~1 ms at 1 MHz)
-    // Clock pulse: low -> high -> low
-    P1OUT |= CLK_PIN;        // CLOCK = 1  (rising edge)
-    __delay_cycles(1000);    // keep high for a moment
-    P1OUT &= ~CLK_PIN;       // CLOCK = 0
-}
-
-//This will send the chosen sequence of shuffled numbers initially to the other board
-void send_sequence(){
-    for (counter = 0; counter < 4; counter++) { //00
-        if (pass[counter] == 1){
-            alpha &= ~(DATA_PIN2 | DATA_PIN1);
-        }else if (pass[counter] == 2){//01
-            alpha &= ~(DATA_PIN2);
-            alpha |= DATA_PIN1;
-        }else if (pass[counter] == 3){ //10
-            alpha |= DATA_PIN2;
-            alpha &= ~DATA_PIN1;
-        }else if (pass[counter] == 4){//11
-            alpha |= (DATA_PIN2 | DATA_PIN1);
-        }
-        send_bits();
+static inline unsigned char encode_symbol(int v)
+{
+    switch (v) {
+        case 1: return 0;                 // 00
+        case 2: return DATA1;             // 01
+        case 3: return DATA2;             // 10
+        case 4: return (DATA1 | DATA2);   // 11
+        default: return 0;
     }
 }
+
+static void send_symbol(int v)
+{
+    unsigned char bits = encode_symbol(v);
+
+    // Put DATA on bus (ONLY data pins!)
+    P1OUT = (P1OUT & ~(DATA1 | DATA2)) | bits;
+
+    __delay_cycles(8000);   // SETUP time (make it large for debugging)
+
+    // STROBE pulse
+    P1OUT |= STROBE;
+    __delay_cycles(8000);   // HOLD time while strobe high
+    P1OUT &= ~STROBE;
+
+    __delay_cycles(8000);   // gap after strobe
+
+    // Go IDLE between symbols (optional but helps a lot)
+    P1OUT &= ~(DATA1 | DATA2);
+    __delay_cycles(200000); // BIG gap (~200ms) so receiver can never miss
+}
+
+void send_sequence(const int pass[4])
+{
+    int i = 0;
+    for (i = 0; i < 4; i++) {
+        send_symbol(pass[i]);
+    }
+}
+
 
 //After I have loaded in the button states into the shift register
 //I will read them one by one
@@ -205,11 +213,21 @@ int main(void)
 {
     initMSP();
     WDTCTL = WDTPW | WDTHOLD;    // stop watchdog
+    
+    // Seed: fixed for now (repeatable). Change later if you want true randomness.
+    srand(1234);
 
-    // P1.0 = CLOCK, P1.3 = DATA as output, start low
-    P1DIR |=  (CLK_PIN | DATA_PIN1);
-    P1OUT &= ~(CLK_PIN | DATA_PIN1);
-    P1DIR &=  ~DATA_PIN2; //input at first
+    // Direction setup for handshake start:
+    // A reads DATA2 (presence) and drives DATA1 (ACK). STROBE is output.
+    P1DIR |= (STROBE | DATA1);
+    P1DIR &= ~DATA2;
+
+    // Pull-down on DATA2 so it doesn't float while waiting
+    P1REN |= DATA2;
+    P1OUT &= ~DATA2;
+
+    // Default outputs low
+    P1OUT &= ~(STROBE | DATA1);
 
     //-------- PB5 as inputs ----------
     P1DIR &= ~button5;       //Set up PB5 as input
@@ -219,8 +237,6 @@ int main(void)
     P1IE |= button5 ;      // Enable interrupt
     P1IES |= button5 ;     //flag is set with a high-to-low transition initially
     P1IFG &= ~button5 ;    // Clear interrupt flag
-
-    alpha = P1OUT;
 
     // Shift Register Pins
     P2DIR |= (clr|s01|s11|s02|s12|ck|sr2);  //outputs
@@ -246,142 +262,136 @@ int main(void)
     TA1CCR0  = 62500 - 1;
     TA1CCTL0 = CCIE;        // enable CCR0 interrupt
     TA1CTL   = TASSEL_2 |ID_3| MC_1 | TACLR; // SMCLK, up mode, clear
-
-    while (1) {
-
-        //Wait for the second player to be ready
-        while (waiting){
-            serialPrintln("player NOT Ready");
-            unsigned char bit2 = (P1IN & DATA_PIN2) ? 1 : 0;
-            if (bit2 == 1){
-                serialPrintln("player Ready");
-                waiting = 0;
-                restart = 1;
-                P1DIR |= DATA_PIN2; //set to output
-                P1OUT |= DATA_PIN1; //default high
-                __delay_cycles(100000);  // wait ~0.1 s before starting the game
-                P1OUT &= ~(DATA_PIN1 | DATA_PIN2); //reset data lines
-            }
-            __delay_cycles(100000);  // wait ~0.1 s between polls
+    
+    serialPrintln("A: waiting for second player...");
+    //Wait for the second player to be ready
+    while (1){
+        if (P1IN & DATA2) {
+            serialPrintln("A: presence detected, sending ACK on DATA1");
+            P1OUT |= DATA1;            // ACK high
+            __delay_cycles(50000);     // hold ACK a bit (~50ms at 1MHz)
+            break;
         }
-
-        //Start the game with the logistics
-        if (restart == 1){
-            P1OUT &= ~(DATA_PIN1 | DATA_PIN2 | CLK_PIN); //reset data lines
-            restart = 0;
-            shuffle4();
-            send_sequence();
-            __delay_cycles(500000);  // wait ~1 s before starting the game
-            __delay_cycles(500000);
-            playing = 1;
-        }
-
-        while (restart == 0){
-            if (playing == 1){
-                //Stop timer of LED_STATUS and turn LED on
-                // This indicates that player is ready to play
-                TA1CTL = 0;        // stop timer
-                TA1CCTL0 &= ~CCIFG;
-                P3OUT |= LED_STATUS; //turn on status LED
-                serialPrintln("Input guess");
-
-                int i = 0;
-                //initialize guess array and counter
-                for (i = 0; i < 4; i++){
-                    guess[i] = 0;
-                }
-                guess_counter = 0;
-
-
-                //I need to wait for the button inputs
-                while (guess_counter < 4){
-                    //Set shift register 1 mode parallel load mode (S0 = 1, S1 = 1)
-                    P2OUT |= s01;
-                    P2OUT |= s11;
-                    pulseCK(); //Load in Q
-                    //Read PB1/PB2/PB3/PB4 output
-                    readButtonInput();
-                }
-
-                serialPrintln("Guess made:");
-                serialPrintInt(guess[0]);
-                serialPrintInt(guess[1]);
-                serialPrintInt(guess[2]);
-                serialPrintInt(guess[3]);
-                serialPrintln(" ");
-
-                //after getting 4 inputs, we check if they are correct
-                int correct[4] = {1,1,1,1};
-                won1 = 1;
-                for (i = 0; i <4; i++){
-                    if (guess[i] != pass[i]){
-                        correct[i] = 0;
-                        won1 = 0;
-                    }
-                }
-
-                //indicate the visual result of the guess
-
-
-                //send the result back to the other board
-                //just send the won1 status
-                if (won1 == 1){
-                    alpha |= (DATA_PIN1 | DATA_PIN2); //send 11
-                }else if (won1 == 0){
-                    alpha &= ~DATA_PIN2; //send 01
-                    alpha |= DATA_PIN1;
-                }
-                send_bits();
-
-                //playing ends here
-                //we wait for the other player to send his result
-                playing = 0;
-                P1DIR &=  ~(DATA_PIN1 | DATA_PIN2); //set data pins to input
-
-            }else{
-                serialPrintln("Waiting for other player's result");
-                unsigned char bit1 = (P1IN & DATA_PIN1) ? 1 : 0;
-                unsigned char bit2 = (P1IN & DATA_PIN2) ? 1 : 0;
-                //Check the results
-                if (bit1){
-                    if (bit2 && bit1){
-                        won2 = 1;
-                    }else if (!bit2 && bit1){
-                        won2 = 0;
-                    }
-                    serialPrintln("Other player's result received");
-
-                    P3OUT &= ~(LED_WINNER | LED_LOSER | LED_TIE);
-                    if (won1 && won2){
-                        serialPrintln("Both players WON!");
-                        P3OUT |= (LED_TIE);
-                        restart = 1; //restart the game after 5s delay
-                        waiting = 1; //go back to waiting for the other player to be ready
-                    }else if (won1 && !won2){
-                        serialPrintln("You WON! Other player LOST!");
-                        P3OUT |= LED_WINNER;
-                        restart = 1; //restart the game after 5s delay
-                        waiting = 1; //go back to waiting for the other player to be ready
-                    }else if (!won1 && won2){
-                        serialPrintln("You LOST! Other player WON!");
-                        P3OUT |= LED_LOSER;
-                        restart = 1; //restart the game after 5s delay
-                        waiting = 1; //go back to waiting for the other player to be ready
-                    }else{
-                        serialPrintln("Both players LOST!");
-                        P3OUT |= LED_LOSER; //turn on status LED
-                        playing = 1; //restart playing
-                    }
-                    int i = 0;
-                    for (i = 0; i<10; i++){
-                        __delay_cycles(500000);
-                    }
-                    P3OUT &= ~(LED_WINNER | LED_LOSER | LED_TIE);
-                }
-
-            }
-        }
-
     }
+
+    // --- Send sequence ---
+    // For sending, A must drive BOTH data pins + strobe.
+    P1DIR |= (DATA1 | DATA2 | STROBE);
+    P1OUT &= ~(DATA1 | DATA2 | STROBE);
+    serialPrintln("A: sending sequence:");
+    shuffle4();
+    send_sequence(pass);
+    __delay_cycles(500000);  // wait ~1 s before starting the game
+    __delay_cycles(500000);
+    playing = 1;
+    restart = 0;
+
+    while (restart == 0){
+        if (playing == 1){
+            //Stop timer of LED_STATUS and turn LED on
+            // This indicates that player is ready to play
+            TA1CTL = 0;        // stop timer
+            TA1CCTL0 &= ~CCIFG;
+            P3OUT |= LED_STATUS; //turn on status LED
+            serialPrintln("Input guess");
+
+            int i = 0;
+            //initialize guess array and counter
+            for (i = 0; i < 4; i++){
+                guess[i] = 0;
+            }
+            guess_counter = 0;
+
+
+            //I need to wait for the button inputs
+            while (guess_counter < 4){
+                //Set shift register 1 mode parallel load mode (S0 = 1, S1 = 1)
+                P2OUT |= s01;
+                P2OUT |= s11;
+                pulseCK(); //Load in Q
+                //Read PB1/PB2/PB3/PB4 output
+                readButtonInput();
+            }
+
+            serialPrintln("Guess made:");
+            serialPrintInt(guess[0]);
+            serialPrintInt(guess[1]);
+            serialPrintInt(guess[2]);
+            serialPrintInt(guess[3]);
+            serialPrintln(" ");
+
+            //after getting 4 inputs, we check if they are correct
+            int correct[4] = {1,1,1,1};
+            won1 = 1;
+            for (i = 0; i <4; i++){
+                if (guess[i] != pass[i]){
+                    correct[i] = 0;
+                    won1 = 0;
+                }
+            }
+
+            //indicate the visual result of the guess
+
+
+            //send the result back to the other board
+            //just send the won1 status
+            if (won1 == 1){
+                alpha |= (DATA_PIN1 | DATA_PIN2); //send 11
+            }else if (won1 == 0){
+                alpha &= ~DATA_PIN2; //send 01
+                alpha |= DATA_PIN1;
+            }
+            send_bits();
+
+            //playing ends here
+            //we wait for the other player to send his result
+            playing = 0;
+            P1DIR &=  ~(DATA_PIN1 | DATA_PIN2); //set data pins to input
+
+        }else{
+            serialPrintln("Waiting for other player's result");
+            unsigned char bit1 = (P1IN & DATA_PIN1) ? 1 : 0;
+            unsigned char bit2 = (P1IN & DATA_PIN2) ? 1 : 0;
+            //Check the results
+            if (bit1){
+                if (bit2 && bit1){
+                    won2 = 1;
+                }else if (!bit2 && bit1){
+                    won2 = 0;
+                }
+                serialPrintln("Other player's result received");
+
+                P3OUT &= ~(LED_WINNER | LED_LOSER | LED_TIE);
+                if (won1 && won2){
+                    serialPrintln("Both players WON!");
+                    P3OUT |= (LED_TIE);
+                    restart = 1; //restart the game after 5s delay
+                    waiting = 1; //go back to waiting for the other player to be ready
+                }else if (won1 && !won2){
+                    serialPrintln("You WON! Other player LOST!");
+                    P3OUT |= LED_WINNER;
+                    restart = 1; //restart the game after 5s delay
+                    waiting = 1; //go back to waiting for the other player to be ready
+                }else if (!won1 && won2){
+                    serialPrintln("You LOST! Other player WON!");
+                    P3OUT |= LED_LOSER;
+                    restart = 1; //restart the game after 5s delay
+                    waiting = 1; //go back to waiting for the other player to be ready
+                }else{
+                    serialPrintln("Both players LOST!");
+                    P3OUT |= LED_LOSER; //turn on status LED
+                    playing = 1; //restart playing
+                }
+                int i = 0;
+                for (i = 0; i<10; i++){
+                    __delay_cycles(500000);
+                }
+                P3OUT &= ~(LED_WINNER | LED_LOSER | LED_TIE);
+            }
+
+        }
+    }
+
 }
+
 
