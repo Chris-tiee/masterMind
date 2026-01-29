@@ -6,16 +6,16 @@
 #include <templateEMP.h>
 
 //Communication pins
-#define STROBE      BIT0    // P1.0  (reuse your CLK pin as STROBE)
-#define DATA_PIN1   BIT3    // P1.3
-#define DATA_PIN2   BIT4    // P1.4
+#define STROBE     BIT0    // P1.0
+#define DATA1      BIT3    // P1.3
+#define DATA2      BIT4    // P1.4
+
+#define LED_STATUS      BIT0        // Yellow   LED on P3.0 to right pin of JP3
+#define LED_WINNER      BIT1        // Green    LED on P3.1 to K4
+#define LED_LOSER       BIT2        // Red      LED on P3.2 to K3
+#define LED_TIE         BIT3        // Blue     LED on P3.3 to X10
 
 #define button5     BIT7    // P1.7
-
-#define LED_STATUS   BIT0       // Yellow   LED on P3.0 to right pin of JP3
-#define LED_WINNER  BIT1        // Green    LED on P3.1 to K4
-#define LED_LOSER  BIT2         // Red      LED on P3.2 to K3
-#define LED_TIE  BIT3           // Blue     LED on P3.3 to X10
 
 //Shift Register Pins
 #define clr BIT5 //P2.5
@@ -36,15 +36,15 @@ void pulseCK(void){
 
 static inline void wait_strobe_rising(void)
 {
-    while (P1IN & STROBE) ;          // wait strobe low
-    while (!(P1IN & STROBE)) ;     // wait rising edge
+    while (P1IN & STROBE);          // wait strobe low
+    while (!(P1IN & STROBE));     // wait rising edge
 }
 
 volatile int pass[4] = {1,2,3,4}; //to hold the sequence/
 //The secret sequence will be a permutation of these four numbers
 //These numbers represent the push buttons PB1/PB2/PB3/PB4 respectively
 
-volatile int  restart = 0; //to  indicate when we want to restart the game
+volatile int  restart = 1; //to  indicate when we want to restart the game
 volatile int  playing = 0; //to indicate if we are in playing mode (1) or waiting mode (0)
 
 //This will be used to save the players guesses while he inputs them during playing mode
@@ -53,6 +53,7 @@ volatile int guess[4] = {0,0,0,0};  //to hold the players guesses
 volatile int won1 = 0; //to indicate if player 1 has won or not
 volatile int won2 = 0; //to indicate if player 2 has won or not
 
+volatile int limit = 3; //number of rounds before tie
 volatile int correct[4] = {1,1,1,1}; //to indicate which positions were correct in the last guess
 
 // ------------ Functions for sending initial sequence ------------
@@ -197,9 +198,10 @@ void collect_guess4(void){
 void send_result(int win){
     //Outputs
     P1DIR |= (STROBE|DATA1|DATA2);
+    P1REN &=  ~(STROBE|DATA1|DATA2);
     P1OUT &= ~(STROBE|DATA1|DATA2);
 
-    // LOSE = 01 (DATA1=1, DATA2=0), WIN = 11
+    // LOSE = 10 (DATA1=1, DATA2=0), WIN = 11
     unsigned char bits = DATA1 | (win ? DATA2 : 0);
 
     P1OUT = (P1OUT & ~(DATA1|DATA2)) | bits;
@@ -216,23 +218,31 @@ void send_result(int win){
     __delay_cycles(200000); // BIG gap (~200ms) so receiver can never miss
 }
 // ------------ Function for receiving result ------------
-int recv_result(void)
-{
+int recv_result(void){
     //Inputs with pull-downs
     P1DIR &= ~(STROBE|DATA1|DATA2);
     P1REN |=  (STROBE|DATA1|DATA2);
     P1OUT &= ~(STROBE|DATA1|DATA2); // pull-down
-
+    // serialPrintln("Waiting for strobe...");
     wait_strobe_rising();
     __delay_cycles(500);
+    // serialPrintln("Strobe received...");
 
     int b1 = (P1IN & DATA1) ? 1 : 0;
     int b2 = (P1IN & DATA2) ? 1 : 0;
 
     while (P1IN & STROBE) ;
+    // serialPrintln("Strobe ended.");
 
     // only accept messages with DATA1=1 (valid)
-    if (!b1) return -1;  // invalid/noise
+    if (!b1) {
+        // serialPrintln("received r: -1");
+        return -1;  // invalid/noise
+    }
+    int r = b2 ? 1 : 0;
+    serialPrintln("received r:");
+    serialPrintInt(r);
+    serialPrintln(" ");
     return (b2 ? 1 : 0); // b2=1 => WIN, else LOSE
 }
 
@@ -255,7 +265,7 @@ void indicate_result(void){
 }
 
 void turnOffLeds(void){
-    P3OUT &= ~(LED_WINNER | LED_LOSER | LED_TIE | LED_STATUS);
+    P3OUT &= ~(LED_WINNER | LED_LOSER | LED_TIE);
     //be ready to shift right
     P2OUT |= s02;
     P2OUT &= ~s12;
@@ -337,8 +347,20 @@ int main(void)
     // Set the shift register 1 mode parallel load mode (S0 = 1, S1 = 1)
     P2OUT |= s01;
     P2OUT |= s11;
+    
+    // ---------- Set up LEDs for status indication -----------
+    P3DIR |= (LED_STATUS | LED_WINNER | LED_LOSER | LED_TIE);
 
     while (restart == 1){
+
+        // ---------- Set up LEDs for status indication -----------
+        P3OUT &= ~(LED_STATUS | LED_WINNER | LED_LOSER | LED_TIE);
+
+        //Set up interrupt for status LED_STATUS blink every 0.5s
+        TA1CCR0  = 62500 - 1;
+        TA1CCTL0 = CCIE;        // enable CCR0 interrupt
+        TA1CTL   = TASSEL_2 |ID_3| MC_1 | TACLR; // SMCLK, up mode, clear
+    
         // Direction setup for handshake start:
         // A reads DATA2 (presence) and drives DATA1 (ACK). STROBE is output.
         P1SEL  &= ~(STROBE|DATA1|DATA2);
@@ -348,19 +370,10 @@ int main(void)
         P1DIR &= ~DATA2;            // Input
         // Pull-down on DATA2 so it doesn't float while waiting
         P1REN |= DATA2;
+        P1REN &=  ~(STROBE|DATA1);
         P1OUT &= ~DATA2;
         // Default outputs low
         P1OUT &= ~(STROBE | DATA1);
-
-        // ---------- Set up LEDs for status indication -----------
-        P3DIR |= (LED_STATUS | LED_WINNER | LED_LOSER | LED_TIE);
-        P3OUT &= ~(LED_STATUS | LED_WINNER | LED_LOSER | LED_TIE);
-
-        //Set up interrupt for status LED_STATUS blink every 0.5s
-        TA1CCR0  = 62500 - 1;
-        TA1CCTL0 = CCIE;        // enable CCR0 interrupt
-        TA1CTL   = TASSEL_2 |ID_3| MC_1 | TACLR; // SMCLK, up mode, clear
-    
         // ------------- Handshake -------------
         serialPrintln("Master: waiting for second player...");
         //Wait for the second player to be ready
@@ -435,16 +448,15 @@ int main(void)
 
             }else{
                 serialPrintln("Waiting for other player's result");
-                int r;
+                int r = -1;
                 do { r = recv_result(); } while (r < 0);
                 won2 = r;
                 serialPrintln("Other player's result received");
 
-
                 P3OUT &= ~(LED_WINNER | LED_LOSER | LED_TIE);
                 if (won1 && won2){
                     serialPrintln("Both players WON!");
-                    P3OUT |= (LED_TIE);
+                    P3OUT |= (LED_TIE|LED_WINNER);
                     restart = 1; //restart the game after 5s delay
                 }else if (won1 && !won2){
                     serialPrintln("You WON! Other player LOST!");
@@ -461,6 +473,12 @@ int main(void)
                 }
 
                 indicate_result();
+                limit --;
+                if (limit == 0){
+                    serialPrintln("Maximum rounds reached. It's a TIE!");
+                    P3OUT |= (LED_TIE);
+                    restart = 1; //restart the game after 5s delay
+                }
 
                 int i = 0;
                 for (i = 0; i<10; i++){
