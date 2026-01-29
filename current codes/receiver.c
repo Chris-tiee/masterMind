@@ -27,7 +27,6 @@
 #define sr2 BIT6 //P2.6
 #define QD1 BIT7 //P2.7
 
-
 //Function to pulse the clock of the shift registers
 void pulseCK(void){
     P2OUT |= ck;
@@ -35,20 +34,19 @@ void pulseCK(void){
     P2OUT &= ~ck;
 }
 
-static inline void wait_strobe_rising(void){
-    while (P1IN & STROBE) ;          // wait strobe low
-    while (!(P1IN & STROBE)) ;     // wait rising edge
+static inline void wait_strobe_rising(void)
+{
+    while (P1IN & STROBE);          // wait strobe low
+    while (!(P1IN & STROBE));     // wait rising edge
 }
 
 static int pass[4]; //to hold the incoming shuffled sequence
 
-volatile int restart = 1; //to  indicate when we want to restart the game
-volatile int playing = 0; //to indicate if the game is ongoing (1) or waiting mode (0)
-
+volatile int  restart = 1; //to  indicate when we want to restart the game
+volatile int  playing = 0; //to indicate if we are in playing mode (1) or waiting mode (0)
 
 //This will be used to save the players guesses while he inputs them during playing mode
 volatile int guess[4] = {0,0,0,0};  //to hold the players guesses
-volatile int guess_counter = 0;     //to wait for 4 button presses
 
 volatile int won1 = 0; //to indicate if player 1 has won or not
 volatile int won2 = 0; //to indicate if player 2 has won or not
@@ -146,9 +144,10 @@ void collect_guess4(void){
 void send_result(int win){
     //Outputs
     P1DIR |= (STROBE|DATA1|DATA2);
+    P1REN &=  ~(STROBE|DATA1|DATA2);
     P1OUT &= ~(STROBE|DATA1|DATA2);
 
-    // LOSE = 01 (DATA1=1, DATA2=0), WIN = 11
+    // LOSE = 10 (DATA1=1, DATA2=0), WIN = 11
     unsigned char bits = DATA1 | (win ? DATA2 : 0);
 
     P1OUT = (P1OUT & ~(DATA1|DATA2)) | bits;
@@ -163,6 +162,7 @@ void send_result(int win){
     // go idle
     P1OUT &= ~(DATA1|DATA2);
     __delay_cycles(200000); // BIG gap (~200ms) so receiver can never miss
+    serialPrintln("Result sent");
 }
 // ------------ Function for receiving result ------------
 int recv_result(void)
@@ -187,6 +187,8 @@ int recv_result(void)
 
 
 //Interrupt for LED to indicate status
+//Flashing if waiting for players to be ready
+//On if player can intput the sequence
 #pragma vector = TIMER1_A0_VECTOR
 __interrupt void Timer1_A0_ISR(void){
     P3OUT ^= LED_STATUS;
@@ -222,15 +224,14 @@ __interrupt void Port_1(void) {
 
 }
 
-int main(void){
-
-    // Initialize controller - *ALWAYS* call this *FIRST*. It's in the template,
-    // so you have to include that as well. See the lecture notes for details.
+// Main function - this one is called when the chip is connected to the power
+int main(void)
+{
     initMSP();
 
     WDTCTL = WDTPW | WDTHOLD;    // stop watchdog
 
-    //-------- PB5 as inputs ----------
+    //-------- PB5 as input for Restart Button ----------
     P1DIR &= ~button5;       //Set up PB5 as input
     P1REN |= button5 ;        // Enable internal resistor
     P1OUT |= button5 ;        // Select pull-up resistor (so default = HIGH)
@@ -239,7 +240,7 @@ int main(void){
     P1IES |= button5 ;     //flag is set with a high-to-low transition initially
     P1IFG &= ~button5 ;    // Clear interrupt flag
 
-    // Shift Register Pins
+    // ---------- Shift Register Pins -----------
     P2DIR |= (clr|s01|s11|s02|s12|ck|sr2);  //outputs
     P2DIR &= ~QD1;                          //input
     P2SEL &= ~(BIT6 | BIT7);    // Make P2.6 and P2.7
@@ -254,13 +255,15 @@ int main(void){
     // Set the shift register 1 mode parallel load mode (S0 = 1, S1 = 1)
     P2OUT |= s01;
     P2OUT |= s11;
+    
+    // ---------- Set up LEDs for status indication -----------
+    P3DIR |= (LED_STATUS | LED_WINNER | LED_LOSER | LED_TIE);
 
     while (restart == 1){
         // ---------- Set up LEDs for status indication -----------
-        P3DIR |= (LED_STATUS | LED_WINNER | LED_LOSER | LED_TIE);
         P3OUT &= ~(LED_STATUS | LED_WINNER | LED_LOSER | LED_TIE);
 
-        //Set up interrupt for status LED every 0.5s
+        //Set up interrupt for status LED_STATUS blink every 0.5s
         TA1CCR0  = 62500 - 1;
         TA1CCTL0 = CCIE;        // enable CCR0 interrupt
         TA1CTL   = TASSEL_2 |ID_3| MC_1 | TACLR; // SMCLK, up mode, clear
@@ -270,16 +273,20 @@ int main(void){
         P1SEL2 &= ~(STROBE|DATA1|DATA2);
         // B drives DATA2 (presence), reads DATA1 (ACK), reads STROBE.
         P1DIR |= DATA2;
-        P1DIR &= ~(DATA1 | STROBE);
+        P1REN &= ~DATA2;
+        P1OUT &= ~DATA2;
         // Pull-downs to avoid floating when not driven
+        P1DIR &= ~(DATA1 | STROBE);
         P1REN |= (DATA1 | STROBE);
         P1OUT &= ~(DATA1 | STROBE);
 
         serialPrintln("B: announcing presence on DATA2...");
         P1OUT |= DATA2;   // presence = 1
         // Wait for ACK from A on DATA1
-        while (!(P1IN & DATA1)) {
-            // keep asserting presence until ACK arrives
+        if (!(P1IN & DATA1)) {
+            while (!(P1IN & DATA1)) {
+                // keep asserting presence until ACK arrives
+            }
         }
         serialPrintln("B: ACK received.");
         // Stop driving presence line; switch DATA2 to input with pull-down
@@ -297,7 +304,7 @@ int main(void){
         P1OUT &= ~(STROBE | DATA1 | DATA2);   // pull-down
 
         for (i = 0; i < 4; i++) {
-            serialPrintln("B: waiting for STROBE...");
+            // serialPrintln("B: waiting for STROBE...");
             wait_strobe_rising();
             __delay_cycles(500);  // tiny settle
 
@@ -305,8 +312,8 @@ int main(void){
             unsigned char b2 = (P1IN & DATA2) ? 1 : 0;
 
             pass[i] = decode_symbol(b1, b2);
-            serialPrintInt(pass[i]);
-            serialPrintln(" ");
+            // serialPrintInt(pass[i]);
+            // serialPrintln(" ");
 
             while (P1IN & STROBE) ; // wait strobe low
         }
@@ -322,13 +329,14 @@ int main(void){
                 __delay_cycles(200);          // tiny settle time
 
             if (playing == 0){
-                int r;
+                serialPrintln("Waiting for other player's guess...");
+                int r = -1;
                 do { r = recv_result(); } while (r < 0);
                 won1 = r;
                 serialPrintln("Other player's result received");
                 playing = 1;
 
-            }else if (playing == 1) {
+            }else if (playing == 1){
                 //Stop timer of LED_STATUS and turn LED on
                 // This indicates that player is ready to play
                 TA1CTL = 0;        // stop timer
@@ -386,6 +394,12 @@ int main(void){
                     P3OUT |= LED_LOSER; //turn on status LED
                     playing = 0; //restart playing in same game
                 }
+                
+                //Inputs with pull-downs
+                P1DIR &= ~(STROBE|DATA1|DATA2);
+                P1REN |=  (STROBE|DATA1|DATA2);
+                P1OUT &= ~(STROBE|DATA1|DATA2); // pull-down
+                //delay to show the result
                 int i = 0;
                 for (i = 0; i<10; i++){
                     __delay_cycles(500000);
