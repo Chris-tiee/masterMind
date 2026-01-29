@@ -53,6 +53,9 @@ volatile int guess_counter = 0;     //to wait for 4 button presses
 volatile int won1 = 0; //to indicate if player 1 has won or not
 volatile int won2 = 0; //to indicate if player 2 has won or not
 
+volatile int correct[4] = {1,1,1,1}; //to indicate which positions were correct in the last guess
+
+// ------------ Functions for receiving initial sequence ------------
 //To decode the received symbol from bits
 static inline int decode_symbol(unsigned char b1, unsigned char b2){
     if (!b2 && !b1) return 1;
@@ -183,6 +186,37 @@ int recv_result(void)
     // only accept messages with DATA1=1 (valid)
     if (!b1) return -1;  // invalid/noise
     return (b2 ? 1 : 0); // b2=1 => WIN, else LOSE
+}
+
+//----- Function to indicate which positions were correct in the last guess -----
+void indicate_result(void){
+    //be ready to shift right
+    P2OUT |= s02;
+    P2OUT &= ~s12;
+    int i = 0;
+    for (i = 0; i <4; i++){
+        if (correct[3-i] == 1){
+            //Push in a 1
+            P2OUT |= sr2;
+        }else{
+            //Push in a 0
+            P2OUT &= ~sr2;
+        }
+        pulseCK();
+    }
+}
+
+void turnOffLeds(void){
+    P3OUT &= ~(LED_WINNER | LED_LOSER | LED_TIE | LED_STATUS);
+    //be ready to shift right
+    P2OUT |= s02;
+    P2OUT &= ~s12;
+    int i = 0;
+    for (i = 0; i <4; i++){
+        //Push in a 0
+        P2OUT &= ~sr2;
+        pulseCK();
+    }
 }
 
 
@@ -346,7 +380,8 @@ int main(void){
                 serialPrintln(" ");
 
                 //after getting 4 inputs, we check if they are correct
-                int correct[4] = {1,1,1,1};
+                int i = 0;
+                for (i = 0; i < 4; i++) correct[i]=1;
                 won2 = 1;
                 for (i = 0; i <4; i++){
                     if (guess[i] != pass[i]){
@@ -386,11 +421,14 @@ int main(void){
                     P3OUT |= LED_LOSER; //turn on status LED
                     playing = 0; //restart playing in same game
                 }
+
+                indicate_result();
                 int i = 0;
                 for (i = 0; i<10; i++){
                     __delay_cycles(500000);
                 }
-                P3OUT &= ~(LED_WINNER | LED_LOSER | LED_TIE);
+                
+                turnOffLeds();
             }
         }
         serialPrintln("A new game will start now...");

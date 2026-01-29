@@ -53,6 +53,8 @@ volatile int guess[4] = {0,0,0,0};  //to hold the players guesses
 volatile int won1 = 0; //to indicate if player 1 has won or not
 volatile int won2 = 0; //to indicate if player 2 has won or not
 
+volatile int correct[4] = {1,1,1,1}; //to indicate which positions were correct in the last guess
+
 // ------------ Functions for sending initial sequence ------------
 //To initialize a random permutation of 4 numbers
 static void shuffle4(void){
@@ -234,7 +236,36 @@ int recv_result(void)
     return (b2 ? 1 : 0); // b2=1 => WIN, else LOSE
 }
 
+//----- Function to indicate which positions were correct in the last guess -----
+void indicate_result(void){
+    //be ready to shift right
+    P2OUT |= s02;
+    P2OUT &= ~s12;
+    int i = 0;
+    for (i = 0; i <4; i++){
+        if (correct[3-i] == 1){
+            //Push in a 1
+            P2OUT |= sr2;
+        }else{
+            //Push in a 0
+            P2OUT &= ~sr2;
+        }
+        pulseCK();
+    }
+}
 
+void turnOffLeds(void){
+    P3OUT &= ~(LED_WINNER | LED_LOSER | LED_TIE | LED_STATUS);
+    //be ready to shift right
+    P2OUT |= s02;
+    P2OUT &= ~s12;
+    int i = 0;
+    for (i = 0; i <4; i++){
+        //Push in a 0
+        P2OUT &= ~sr2;
+        pulseCK();
+    }
+}
 //Interrupt for LED to indicate status
 //Flashing if waiting for players to be ready
 //On if player can intput the sequence
@@ -374,7 +405,9 @@ int main(void)
                 serialPrintln(" ");
 
                 //after getting 4 inputs, we check if they are correct
-                int correct[4] = {1,1,1,1};
+                int i = 0;
+                for (i = 0; i < 4; i++) correct[i]=1;
+
                 won1 = 1;
                 for (i = 0; i <4; i++){
                     if (guess[i] != pass[i]){
@@ -407,6 +440,7 @@ int main(void)
                 won2 = r;
                 serialPrintln("Other player's result received");
 
+
                 P3OUT &= ~(LED_WINNER | LED_LOSER | LED_TIE);
                 if (won1 && won2){
                     serialPrintln("Both players WON!");
@@ -425,11 +459,15 @@ int main(void)
                     P3OUT |= LED_LOSER; //turn on status LED
                     playing = 1; //restart playing in same game
                 }
+
+                indicate_result();
+
                 int i = 0;
                 for (i = 0; i<10; i++){
                     __delay_cycles(500000);
                 }
-                P3OUT &= ~(LED_WINNER | LED_LOSER | LED_TIE);
+                
+                turnOffLeds();
             }
         }
         serialPrintln("A new game will start now...");
