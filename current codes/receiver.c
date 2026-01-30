@@ -484,9 +484,19 @@ int main(void)
                      serialPrintln("Both players LOST!");
                     P3OUT |= LED_LOSER; //turn on status LED
                     if (limit > 0){
-                        playing = 1; //restart playing in same game
+                        playing = 0; //restart playing in same game
                         for (melody_counter = 0; melody_counter < 6; melody_counter++) {
                                 playNote(loserMelody[melody_counter]);
+                        }
+                        //shut down the sound
+                        TA0CCR0 = 0; //Frequency   // PWM Period
+                        TA0CCR2 = 0; // CCR2 PWM duty cycle (50 %)
+                    }else if (limit == 0){
+                        serialPrintln("Maximum rounds reached. It's a TIE!");
+                        P3OUT |= (LED_TIE);
+                        restart = 1; //restart the game after 5s delay
+                        for (melody_counter = 0; melody_counter < 4; melody_counter++) {
+                                playNote(tieMelody[melody_counter]);
                         }
                         //shut down the sound
                         TA0CCR0 = 0; //Frequency   // PWM Period
@@ -498,18 +508,6 @@ int main(void)
                 P1REN |=  (STROBE|DATA1|DATA2);
                 P1OUT &= ~(STROBE|DATA1|DATA2); // pull-down
                 //delay to show the result
-                if (limit == 0){
-                    serialPrintln("Maximum rounds reached. It's a TIE!");
-                    P3OUT |= (LED_TIE);
-                    restart = 1; //restart the game after 5s delay
-                    for (melody_counter = 0; melody_counter < 4; melody_counter++) {
-                            playNote(tieMelody[melody_counter]);
-                    }
-                    //shut down the sound
-                    TA0CCR0 = 0; //Frequency   // PWM Period
-                    TA0CCR2 = 0; // CCR2 PWM duty cycle (50 %)
-                }
-
                 indicate_result();
                 for (i = 0; i<6; i++){
                     __delay_cycles(500000);
