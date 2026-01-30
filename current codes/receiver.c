@@ -15,6 +15,8 @@
 #define LED_LOSER       BIT2        // Red      LED on P3.2 to K3
 #define LED_TIE         BIT3        // Blue     LED on P3.3 to X10
 
+#define BUZZER_PIN      BIT6        // P3.6 Piezo Buzzer
+
 #define button5     BIT7    // P1.7
 
 //Shift Register Pins
@@ -34,89 +36,218 @@ void pulseCK(void){
     P2OUT &= ~ck;
 }
 
+static inline void wait_strobe_rising(void){
+    while (P1IN & STROBE);          // wait strobe low
+    while (!(P1IN & STROBE));     // wait rising edge
+}
+
+//------------- Melody Data and Functions --------------
+// Game start melody 
+volatile int gameStartMelody[6] = {1912, 1517, 1276,  956};
+// Winner melody
+volatile int winnerMelody[6] = {2551, 1912, 1517, 1276,  956,  956};
+// Losing melody
+volatile int loserMelody[6] = {1517,1703,1912,2273,2551,3817};
+// Tie melody (neutral / draw)
+volatile int tieMelody[6] = {1912, 2273, 1912, 2273, 1703, 1912};
+
+//Function that plays a specific note
+void playNote(frequency){
+    TA0CCR0 = frequency; //Frequency   // PWM Period
+    TA0CCR2 = 500; // CCR2 PWM duty cycle (50 %)
+    __delay_cycles(500000); //500ms
+}
+
 static int pass[4]; //to hold the incoming shuffled sequence
-volatile int counter = 0; //to loop over the sequence
 
-volatile int waiting = 1; //to indicate that we are waiting for the players to be ready
-
-volatile int restart = 1; //to  indicate when we want to restart the game
-volatile int playing = 0; //to indicate if the game is ongoing (1) or waiting mode (0)
-
+volatile int  restart = 1; //to  indicate when we want to restart the game
+volatile int  playing = 0; //to indicate if we are in playing mode (1) or waiting mode (0)
 
 //This will be used to save the players guesses while he inputs them during playing mode
 volatile int guess[4] = {0,0,0,0};  //to hold the players guesses
-volatile int guess_counter = 0;     //to wait for 4 button presses
 
 volatile int won1 = 0; //to indicate if player 1 has won or not
 volatile int won2 = 0; //to indicate if player 2 has won or not
 
-static inline void wait_strobe_rising(void)
-{
-    while (P1IN & STROBE) ;          // wait strobe low
-    while (!(P1IN & STROBE)) ;     // wait rising edge
-}
+volatile int correct[4] = {1,1,1,1}; //to indicate which positions were correct in the last guess
+volatile int limit = 3; //number of rounds before tie
 
-static inline int decode_symbol(unsigned char b1, unsigned char b2)
-{
+// ------------ Functions for receiving initial sequence ------------
+//To decode the received symbol from bits
+static inline int decode_symbol(unsigned char b1, unsigned char b2){
     if (!b2 && !b1) return 1;
     if (!b2 &&  b1) return 2;
     if ( b2 && !b1) return 3;
     return 4;
 }
 
+//----------- Functions to read the button inputs -----------
 //After I have loaded in the button states into the shift register
-//I will read them one by one
-void readButtonInput(){
-    //Read PB4 output
-    if (P2IN & QD1){ //If pressed
-        guess[guess_counter] = 4;
-        guess_counter++;
-    }
+//I will read them one by one because we only have access to QD pin
+// returns 4-bit mask: b0=PB1, b1=PB2, b2=PB3, b3=PB4
+unsigned char read_buttons_mask(void){
+    unsigned char m = 0;
 
-    // Set shift register 1 mode to right shift mode (S0 = 1, S1 = 0)
-    // In order to read PB3 output
-    P2OUT |= s01;
-    P2OUT &= ~s11;
-    pulseCK(); //shift QC to QD
+    // 1) parallel load the register (you already do this)
+    P2OUT |= s01; P2OUT |= s11;   // parallel load mode
+    pulseCK();                    // load button states into SR
 
-    //Read PB3 output
-    if (P2IN & QD1){ //If pressed
-        guess[guess_counter] = 3;
-        guess_counter++;
-    }
+    // Now QD1 reads PB4 first in your wiring (adjust if needed)
+    // We'll read PB4, PB3, PB2, PB1 by shifting and sampling QD1
 
-    // Set shift register 1 mode to right shift mode (S0 = 1, S1 = 0)
-    // In order to read PB2 output
-    P2OUT |= s01;
-    P2OUT &= ~s11;
-    pulseCK(); //shift QC to QD
+    // PB4
+    if (P2IN & QD1) m |= (1 << 3);
 
-    //Read PB2 output
-    if (P2IN & QD1){ //If pressed
-        guess[guess_counter] = 2;
-        guess_counter++;
-    }
+    // shift -> PB3 to QD
+    P2OUT |= s01; P2OUT &= ~s11;  // right shift mode
+    pulseCK();
+    if (P2IN & QD1) m |= (1 << 2);
 
-    // Set shift register 1 mode to right shift mode (S0 = 1, S1 = 0)
-    // In order to read PB1 output
-    P2OUT |= s01;
-    P2OUT &= ~s11;
-    pulseCK(); //shift QC to QD
+    // PB2
+    pulseCK();
+    if (P2IN & QD1) m |= (1 << 1);
 
-    //Read PB1 output
-    if (P2IN & QD1){ //If pressed
-        guess[guess_counter] = 1;
-        guess_counter++;
+    // PB1
+    pulseCK();
+    if (P2IN & QD1) m |= (1 << 0);
+
+    return m;
+}
+// converts one-hot mask bit to number 1..4
+int mask_to_button(unsigned char onehot){
+    if (onehot & (1<<0)) return 1;
+    if (onehot & (1<<1)) return 2;
+    if (onehot & (1<<2)) return 3;
+    if (onehot & (1<<3)) return 4;
+    return 0;
+}
+//Now the functions to get the inputs
+void collect_guess4(void){
+    int i = 0;
+    for (i = 0; i < 4; i++) guess[i]=0;
+
+    int guess_counter = 0;
+    unsigned char prev = 0;
+
+    while (guess_counter < 4) {
+        unsigned char m = read_buttons_mask();
+
+        unsigned char new_press = (unsigned char)(m & ~prev);
+
+        if (new_press) {
+            // If multiple pressed at once, ignore until only one is pressed
+            if ((new_press & (new_press - 1)) == 0) { // power-of-two check
+                int b = mask_to_button(new_press);
+
+                // Optional: reject duplicates (if your rules want that)
+                int dup = 0;
+                int k = 0;
+                for (k=0;k<guess_counter;k++) if (guess[k]==b) dup=1;
+                if (!dup) {
+                    guess[guess_counter++] = b;
+                }
+
+                // Wait until ALL buttons released (simple debounce)
+                do {
+                    __delay_cycles(20000);
+                    m = read_buttons_mask();
+                } while (m != 0);
+            }
+        }
+        prev = m;
+        __delay_cycles(5000); // small scan period
     }
 }
 
+// ------------ Function for sending result ------------
+void send_result(int win){
+    //Outputs
+    P1DIR |= (STROBE|DATA1|DATA2);
+    P1REN &=  ~(STROBE|DATA1|DATA2);
+    P1OUT &= ~(STROBE|DATA1|DATA2);
+
+    // LOSE = 10 (DATA1=1, DATA2=0), WIN = 11
+    unsigned char bits = DATA1 | (win ? DATA2 : 0);
+
+    P1OUT = (P1OUT & ~(DATA1|DATA2)) | bits;
+    __delay_cycles(20000);
+
+    P1OUT |= STROBE;
+    __delay_cycles(20000);
+    P1OUT &= ~STROBE;
+
+    __delay_cycles(8000);   // gap after strobe
+    
+    // go idle
+    P1OUT &= ~(DATA1|DATA2);
+    __delay_cycles(200000); // BIG gap (~200ms) so receiver can never miss
+    serialPrintln("Result sent");
+}
+// ------------ Function for receiving result ------------
+int recv_result(void){
+    //Inputs with pull-downs
+    P1DIR &= ~(STROBE|DATA1|DATA2);
+    P1REN |=  (STROBE|DATA1|DATA2);
+    P1OUT &= ~(STROBE|DATA1|DATA2); // pull-down
+
+    wait_strobe_rising();
+    __delay_cycles(500);
+
+    int b1 = (P1IN & DATA1) ? 1 : 0;
+    int b2 = (P1IN & DATA2) ? 1 : 0;
+
+    while (P1IN & STROBE) ;
+
+    // only accept messages with DATA1=1
+    if (!b1) return -1;  // invalid/noise
+    return (b2 ? 1 : 0); // b2=1 => WIN, else LOSE
+}
+
+//----- Function to indicate which positions were correct in the last guess -----
+//This will indicate the result on the LEDs of the shift register
+//The way it works is that we light up the LEDs that correspond to the
+// location of the correct numbers in the sequence
+//Ex: If second number inputted is correct, we light up D2
+void indicate_result(void){
+    //be ready to shift right
+    P2OUT |= s02;
+    P2OUT &= ~s12;
+    int i = 0;
+    for (i = 0; i <4; i++){
+        if (correct[3-i] == 1){
+            //Push in a 1
+            P2OUT |= sr2;
+        }else{
+            //Push in a 0
+            P2OUT &= ~sr2;
+        }
+        pulseCK();
+    }
+    // Set the shift register 2 mode do nothing (S0 = 0, S1 = 0)
+    P2OUT &= ~s02;
+    P2OUT &= ~s12;
+
+}
+void turnOffLeds(void){
+    P3OUT &= ~(LED_WINNER | LED_LOSER | LED_TIE);
+    //be ready to shift right
+    P2OUT |= s02;
+    P2OUT &= ~s12;
+    int i = 0;
+    for (i = 0; i <4; i++){
+        //Push in a 0
+        P2OUT &= ~sr2;
+        pulseCK();
+    }
+}
 
 //Interrupt for LED to indicate status
+//Flashing if waiting for players to be ready
+//On if player can intput the sequence
 #pragma vector = TIMER1_A0_VECTOR
 __interrupt void Timer1_A0_ISR(void){
     P3OUT ^= LED_STATUS;
 }
-
 
 // Interrupt functionality of PB5
 #pragma vector = PORT1_VECTOR
@@ -137,34 +268,22 @@ __interrupt void Port_1(void) {
         TA1CCTL0 &= ~CCIFG;
         P3OUT |= (LED_TIE | LED_STATUS | LED_WINNER | LED_LOSER);
 
-        __delay_cycles(500000);  // wait ~1 s before restarting the game
-        __delay_cycles(500000);
+        __delay_cycles(500000);  // wait ~0.5 s before restarting the game
         WDTCTL = 0x0000;
     }
-
     // Prepare for the next press of the button
     P1IFG &= ~button5;      //clear flag
     P1IE  |=  button5;      // re-enable pin interrupt
-
 }
 
-int main(void){
-
-    // Initialize controller - *ALWAYS* call this *FIRST*. It's in the template,
-    // so you have to include that as well. See the lecture notes for details.
+// Main function - this one is called when the chip is connected to the power
+int main(void)
+{
     initMSP();
 
     WDTCTL = WDTPW | WDTHOLD;    // stop watchdog
 
-    // Handshake start:
-    // B drives DATA2 (presence), reads DATA1 (ACK), reads STROBE.
-    P1DIR |= DATA2;
-    P1DIR &= ~(DATA1 | STROBE);
-    // Pull-downs to avoid floating when not driven
-    P1REN |= (DATA1 | STROBE);
-    P1OUT &= ~(DATA1 | STROBE);
-
-    //-------- PB5 as inputs ----------
+    //-------- PB5 as input for Restart Button ----------
     P1DIR &= ~button5;       //Set up PB5 as input
     P1REN |= button5 ;        // Enable internal resistor
     P1OUT |= button5 ;        // Select pull-up resistor (so default = HIGH)
@@ -173,7 +292,8 @@ int main(void){
     P1IES |= button5 ;     //flag is set with a high-to-low transition initially
     P1IFG &= ~button5 ;    // Clear interrupt flag
 
-    // Shift Register Pins
+    // ---------- Shift Register Pins -----------
+    //SR1 for buttons and SR2 for LEDs
     P2DIR |= (clr|s01|s11|s02|s12|ck|sr2);  //outputs
     P2DIR &= ~QD1;                          //input
     P2SEL &= ~(BIT6 | BIT7);    // Make P2.6 and P2.7
@@ -188,126 +308,221 @@ int main(void){
     // Set the shift register 1 mode parallel load mode (S0 = 1, S1 = 1)
     P2OUT |= s01;
     P2OUT |= s11;
-
-    // Set up LEDs
+    
+    // ---------- Initialize piezzo as buzzer -----------
+    P3DIR |= BUZZER_PIN;  // P3.6 output
+    P3REN &= ~BUZZER_PIN; //disable internal resistor
+    P3SEL |= BUZZER_PIN;  // P3.6 TA0.2 option
+    TA0CCTL2 = OUTMOD_3; // CCR2 set/reset
+    //Starting with no sound at all
+    TA0CCR0 = 0; //Frequency
+    TA0CCR2 = 0; // CCR2 PWM duty cycle (50 %)
+    TA0CTL = TASSEL_2 + MC_1; // SMCLK; MC_1-> up mode;
+    
+    // ---------- Set up LEDs for visual indication -----------
     P3DIR |= (LED_STATUS | LED_WINNER | LED_LOSER | LED_TIE);
-    P3OUT &= ~(LED_STATUS | LED_WINNER | LED_LOSER | LED_TIE);
 
-    //Set up interrupt for status LED every 0.5s
-    TA1CCR0  = 62500 - 1;
-    TA1CCTL0 = CCIE;        // enable CCR0 interrupt
-    TA1CTL   = TASSEL_2 |ID_3| MC_1 | TACLR; // SMCLK, up mode, clear
+    while (restart == 1){
+        // ---------- Set up LEDs for visual indication -----------
+        P3OUT &= ~(LED_STATUS | LED_WINNER | LED_LOSER | LED_TIE);
 
-    serialPrintln("B: announcing presence on DATA2...");
-    P1OUT |= DATA2;   // presence = 1
-    // Wait for ACK from A on DATA1
-    while (!(P1IN & DATA1)) {
-        // keep asserting presence until ACK arrives
-    }
-    serialPrintln("B: ACK received.");
-    // Stop driving presence line; switch DATA2 to input with pull-down
-    P1OUT &= ~DATA2;
-    P1DIR &= ~DATA2;
-    P1REN |= DATA2;
-    P1OUT &= ~DATA2;
+        //Set up interrupt for status LED_STATUS blink every 0.5s
+        TA1CCR0  = 62500 - 1;
+        TA1CCTL0 = CCIE;   // enable CCR0 interrupt
+        TA1CTL   = TASSEL_2 |ID_3| MC_1 | TACLR; // SMCLK, up mode, clear
 
-    // Now B will receive 4 symbols:
-    serialPrintln("B: receiving sequence:");
-    int i = 0;
-    // Inputs + pull-downs so nothing floats
-    P1DIR &= ~(STROBE | DATA1 | DATA2);
-    P1REN |=  (STROBE | DATA1 | DATA2);
-    P1OUT &= ~(STROBE | DATA1 | DATA2);   // pull-down
+        // Handshake start:
+        P1SEL  &= ~(STROBE|DATA1|DATA2);
+        P1SEL2 &= ~(STROBE|DATA1|DATA2);
+        // Slave announces presence on DATA2 
+        // Reads DATA1 for acknowledgment, reads STROBE.
+        P1DIR |= DATA2;
+        P1REN &= ~DATA2;
+        P1OUT &= ~DATA2;
+        // Pull-downs to avoid floating when not driven
+        P1DIR &= ~(DATA1 | STROBE);
+        P1REN |= (DATA1 | STROBE);
+        P1OUT &= ~(DATA1 | STROBE);
 
-    for (i = 0; i < 4; i++) {
-        serialPrintln("B: waiting for STROBE...");
-        wait_strobe_rising();
-        __delay_cycles(500);  // tiny settle
+        // ------------- Handshake -------------
+        serialPrintln("Slave: announcing presence on DATA2...");
+        P1OUT |= DATA2;   // presence = 1
+        // Wait for ACK from Master on DATA1
+        while (!(P1IN & DATA1)) {
+            // keep asserting presence until ACK arrives
+        }
+        serialPrintln("Slave: ACK received.");
+        // Stop driving presence line; switch DATA2 to input with pull-down
+        P1OUT &= ~DATA2;
+        P1DIR &= ~DATA2;
+        P1REN |= DATA2;
+        P1OUT &= ~DATA2;
 
-        unsigned char b1 = (P1IN & DATA1) ? 1 : 0;
-        unsigned char b2 = (P1IN & DATA2) ? 1 : 0;
+        // --------- Receive shuffled sequence -----------
+        // Inputs + pull-downs so nothing floats
+        P1DIR &= ~(STROBE | DATA1 | DATA2);
+        P1REN |=  (STROBE | DATA1 | DATA2);
+        P1OUT &= ~(STROBE | DATA1 | DATA2);   // pull-down
 
-        pass[i] = decode_symbol(b1, b2);
-        serialPrintInt(pass[i]);
+        serialPrintln("B: receiving sequence:");
+        int i = 0;
+
+        for (i = 0; i < 4; i++) {
+            // serialPrintln("B: waiting for STROBE...");
+            wait_strobe_rising();
+            __delay_cycles(500);  // tiny settle
+
+            unsigned char b1 = (P1IN & DATA1) ? 1 : 0;
+            unsigned char b2 = (P1IN & DATA2) ? 1 : 0;
+
+            pass[i] = decode_symbol(b1, b2);
+            // serialPrintInt(pass[i]);
+            // serialPrintln(" ");
+
+            while (P1IN & STROBE) ; // wait strobe low
+        }
+        serialPrintInt(pass[0]); serialPrintInt(pass[1]);
+        serialPrintInt(pass[2]); serialPrintInt(pass[3]);
         serialPrintln(" ");
+        serialPrintln("B: Sequence received.");
+        restart = 0;
+        playing = 0;
+        limit = 3;
 
-        while (P1IN & STROBE) ; // wait strobe low
-    }
-    serialPrintInt(pass[0]); serialPrintInt(pass[1]);
-    serialPrintInt(pass[2]); serialPrintInt(pass[3]);
-    serialPrintln(" ");
-    serialPrintln("B: Sequence received.");
-    counter = 0;
-    restart = 0;
+        // ---------- Main game loop -----------
+        while (restart == 0){
 
-    //Main game loop
-    while (restart == 0){
-            __delay_cycles(200);          // tiny settle time
+            if (playing == 0){
+                serialPrintln("Waiting for other player's guess...");
+                int r = -1;
+                do { r = recv_result(); } while (r < 0);
+                won1 = r;
+                serialPrintln("Other player's result received");
+                playing = 1;
 
-        if (playing == 0){
-            serialPrintln("Waiting for other player's result");
-            unsigned char bit1 = (P1IN & DATA_PIN1) ? 1 : 0;
-            unsigned char bit2 = (P1IN & DATA_PIN2) ? 1 : 0;
-            if (!bit2 && bit1){
-                won1 = 0;
-            }else if (bit2 && bit1){
-                won1 = 1;
-            }
-            playing = 1;
-            serialPrintln("Other player's result received");
+            }else if (playing == 1){
+                //Stop timer of LED_STATUS and turn LED on
+                // This indicates that player is ready to play
+                TA1CTL = 0;        // stop timer
+                TA1CCTL0 &= ~CCIFG;
+                P3OUT |= LED_STATUS; //turn on status LED
+                serialPrintln("Input guess:");
 
-        }else if (playing == 1) {
-            //Stop timer of LED_STATUS and turn LED on
-            // This indicates that player is ready to play
-            TA1CTL = 0;        // stop timer
-            TA1CCTL0 &= ~CCIFG;
-            P3OUT |= LED_STATUS; //turn on status LED
-            serialPrintln("Input guess:");
+                collect_guess4();
 
-            //initialize guess array and counter
-            int i = 0;
-            for (i = 0; i < 4; i++){
-                guess[i] = 0;
-            }
-            guess_counter = 0;
+                serialPrintln("Guess made:");
+                serialPrintInt(guess[0]);
+                serialPrintInt(guess[1]);
+                serialPrintInt(guess[2]);
+                serialPrintInt(guess[3]);
+                serialPrintln(" ");
+                
+                //Turn back the status LED timer
+                TA1CCR0  = 62500 - 1;
+                TA1CCTL0 = CCIE;        // enable CCR0 interrupt
+                TA1CTL   = TASSEL_2 |ID_3| MC_1 | TACLR; // SMCLK, up mode, clear
 
-            //I need to wait for the button inputs
-            while (guess_counter < 4){
-                //Set shift register 1 mode parallel load mode (S0 = 1, S1 = 1)
-                P2OUT |= s01;
-                P2OUT |= s11;
-                pulseCK(); //Load in Q
-                //Read PB1/PB2/PB3/PB4 output
-                readButtonInput();
-            }
-
-            serialPrintln("Guess made:");
-            serialPrintInt(guess[0]);
-            serialPrintInt(guess[1]);
-            serialPrintInt(guess[2]);
-            serialPrintInt(guess[3]);
-            serialPrintln(" ");
-
-            //after getting 4 inputs, we check if they are correct
-            int correct[4] = {1,1,1,1};
-            won2 = 1;
-            for (i = 0; i <4; i++){
-                if (guess[i] != pass[i]){
-                    correct[i] = 0;
-                    won2 = 0;
+                //after getting 4 inputs, we check if they are correct
+                int i = 0;
+                for (i = 0; i < 4; i++) correct[i]=1;
+                won2 = 1;
+                for (i = 0; i <4; i++){
+                    if (guess[i] != pass[i]){
+                        correct[i] = 0;
+                        won2 = 0;
+                    }
                 }
-            }
 
-            //send the result back to the other board
-            //just send the won2 status
-            if (won2 == 1){
-                P1OUT |= (DATA_PIN1 | DATA_PIN2); //send 11
-            }else if (won2 == 0){
-                P1OUT &= ~DATA_PIN2; //send 10
-                P1OUT |= DATA_PIN1;
+                //send the result back to the other board
+                //just send the won2 status
+                send_result(won2);
+
+                //Stop timer of LED_STATUS and turn LED off
+                TA1CTL = 0;        // stop timer
+                TA1CCTL0 &= ~CCIFG;
+
+                P3OUT &= ~(LED_WINNER | LED_LOSER | LED_TIE | LED_STATUS);
+                indicate_result();
+                limit --;
+
+                int melody_counter = 0;
+                //Compare results and decide next steps
+                if (won1 && won2){
+                    serialPrintln("Both players WON!");
+                    P3OUT |= (LED_TIE|LED_WINNER);
+                    restart = 1; //restart the game after 5s delay
+                    //Play winning melody
+                    for (melody_counter = 0; melody_counter < 6; melody_counter++){
+                            playNote(winnerMelody[melody_counter]);
+                    }
+                    //shut down the sound
+                    TA0CCR0 = 0; //Frequency   // PWM Period
+                    TA0CCR2 = 0; // CCR2 PWM duty cycle (50 %)
+                }else if (!won1 && won2){
+                    serialPrintln("You WON! Other player LOST!");
+                    P3OUT |= LED_WINNER;
+                    restart = 1; //restart the game after 5s delay
+                    //Play winning melody
+                    for (melody_counter = 0; melody_counter < 6; melody_counter++){
+                            playNote(winnerMelody[melody_counter]);
+                    }
+                    //shut down the sound
+                    TA0CCR0 = 0; //Frequency   // PWM Period
+                    TA0CCR2 = 0; // CCR2 PWM duty cycle (50 %)
+                }else if (won1 && !won2){
+                    serialPrintln("You LOST! Other player WON!");
+                    P3OUT |= LED_LOSER;
+                    restart = 1; //restart the game after 5s delay
+                    //Play losing melody
+                    for (melody_counter = 0; melody_counter < 6; melody_counter++){
+                            playNote(loserMelody[melody_counter]);
+                    }
+                    //shut down the sound
+                    TA0CCR0 = 0; //Frequency   // PWM Period
+                    TA0CCR2 = 0; // CCR2 PWM duty cycle (50 %)
+                }else{
+                     serialPrintln("Both players LOST!");
+                    P3OUT |= LED_LOSER; //turn on status LED
+                    if (limit > 0){
+                        playing = 1; //restart playing in same game
+                        for (melody_counter = 0; melody_counter < 6; melody_counter++) {
+                                playNote(loserMelody[melody_counter]);
+                        }
+                        //shut down the sound
+                        TA0CCR0 = 0; //Frequency   // PWM Period
+                        TA0CCR2 = 0; // CCR2 PWM duty cycle (50 %)
+                    }
+                }
+                //Inputs with pull-downs
+                P1DIR &= ~(STROBE|DATA1|DATA2);
+                P1REN |=  (STROBE|DATA1|DATA2);
+                P1OUT &= ~(STROBE|DATA1|DATA2); // pull-down
+                //delay to show the result
+                if (limit == 0){
+                    serialPrintln("Maximum rounds reached. It's a TIE!");
+                    P3OUT |= (LED_TIE);
+                    restart = 1; //restart the game after 5s delay
+                    for (melody_counter = 0; melody_counter < 4; melody_counter++) {
+                            playNote(tieMelody[melody_counter]);
+                    }
+                    //shut down the sound
+                    TA0CCR0 = 0; //Frequency   // PWM Period
+                    TA0CCR2 = 0; // CCR2 PWM duty cycle (50 %)
+                }
+
+                indicate_result();
+                for (i = 0; i<6; i++){
+                    __delay_cycles(500000);
+                }
+                
+                turnOffLeds();
+                //Turn on timer for status LED again
+                TA1CCR0  = 62500 - 1;
+                TA1CCTL0 = CCIE;        // enable CCR0 interrupt
+                TA1CTL   = TASSEL_2 |ID_3| MC_1 | TACLR; // SMCLK, up mode, clear
             }
         }
-
+        serialPrintln("A new game will start now...");
     }
 }
 
