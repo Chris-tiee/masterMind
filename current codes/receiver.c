@@ -42,7 +42,7 @@ static inline void wait_strobe_rising(void){
 }
 
 //------------- Melody Data and Functions --------------
-// Game start melody 
+// Game start melody
 volatile int gameStartMelody[6] = {1912, 1517, 1276,  956};
 // Winner melody
 volatile int winnerMelody[6] = {2551, 1912, 1517, 1276,  956,  956};
@@ -177,7 +177,7 @@ void send_result(int win){
     P1OUT &= ~STROBE;
 
     __delay_cycles(8000);   // gap after strobe
-    
+
     // go idle
     P1OUT &= ~(DATA1|DATA2);
     __delay_cycles(200000); // BIG gap (~200ms) so receiver can never miss
@@ -308,7 +308,7 @@ int main(void)
     // Set the shift register 1 mode parallel load mode (S0 = 1, S1 = 1)
     P2OUT |= s01;
     P2OUT |= s11;
-    
+
     // ---------- Initialize piezzo as buzzer -----------
     P3DIR |= BUZZER_PIN;  // P3.6 output
     P3REN &= ~BUZZER_PIN; //disable internal resistor
@@ -318,7 +318,7 @@ int main(void)
     TA0CCR0 = 0; //Frequency
     TA0CCR2 = 0; // CCR2 PWM duty cycle (50 %)
     TA0CTL = TASSEL_2 + MC_1; // SMCLK; MC_1-> up mode;
-    
+
     // ---------- Set up LEDs for visual indication -----------
     P3DIR |= (LED_STATUS | LED_WINNER | LED_LOSER | LED_TIE);
 
@@ -334,7 +334,7 @@ int main(void)
         // Handshake start:
         P1SEL  &= ~(STROBE|DATA1|DATA2);
         P1SEL2 &= ~(STROBE|DATA1|DATA2);
-        // Slave announces presence on DATA2 
+        // Slave announces presence on DATA2
         // Reads DATA1 for acknowledgment, reads STROBE.
         P1DIR |= DATA2;
         P1REN &= ~DATA2;
@@ -416,7 +416,7 @@ int main(void)
                 serialPrintInt(guess[2]);
                 serialPrintInt(guess[3]);
                 serialPrintln(" ");
-                
+
                 //Turn back the status LED timer
                 TA1CCR0  = 62500 - 1;
                 TA1CCTL0 = CCIE;        // enable CCR0 interrupt
@@ -512,7 +512,7 @@ int main(void)
                 for (i = 0; i<6; i++){
                     __delay_cycles(500000);
                 }
-                
+
                 turnOffLeds();
                 //Turn on timer for status LED again
                 TA1CCR0  = 62500 - 1;
