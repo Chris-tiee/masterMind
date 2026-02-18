@@ -43,7 +43,7 @@ static inline void wait_strobe_rising(void){
 }
 
 //------------- Melody Data and Functions --------------
-// Game start melody 
+// Game start melody
 volatile int gameStartMelody[6] = {1912, 1517, 1276,  956};
 // Winner melody
 volatile int winnerMelody[6] = {2551, 1912, 1517, 1276,  956,  956};
@@ -229,7 +229,7 @@ void send_result(int win){
     P1OUT &= ~STROBE;
 
     __delay_cycles(8000);   // gap after strobe
-    
+
     // go idle
     P1OUT &= ~(DATA1|DATA2);
     __delay_cycles(200000); // BIG gap (~200ms) so receiver can never miss
@@ -343,7 +343,7 @@ int main(void)
 {
     initMSP();
     WDTCTL = WDTPW | WDTHOLD;    // stop watchdog
-    
+
     // Seed: fixed for repeatability
     // srand(1234);
     srand((unsigned)time(NULL));
@@ -396,7 +396,7 @@ int main(void)
         TA1CCR0  = 62500 - 1;
         TA1CCTL0 = CCIE;   // enable CCR0 interrupt
         TA1CTL   = TASSEL_2 |ID_3| MC_1 | TACLR; // SMCLK, up mode, clear
-    
+
         // Direction setup for handshake start:
         // Master reads DATA2 for presence of second player
         // and send ACK on DATA1. STROBE is output.
@@ -465,7 +465,7 @@ int main(void)
                 serialPrintInt(guess[2]);
                 serialPrintInt(guess[3]);
                 serialPrintln(" ");
-                
+
                 //Turn on timer for status LED again
                 TA1CCR0  = 62500 - 1;
                 TA1CCTL0 = CCIE;        // enable CCR0 interrupt
@@ -481,15 +481,15 @@ int main(void)
                         won1 = 0;
                     }
                 }
-                
+
                 //send the result back to the other board
                 //just send the won1 status
                 send_result(won1);
-                
+
                 //playing ends here
                 //we wait for the other player to send his result
                 playing = 0;
-                
+
 
             }else{
                 serialPrintln("Waiting for other player's result");
@@ -497,7 +497,7 @@ int main(void)
                 do { r = recv_result(); } while (r < 0);
                 won2 = r;
                 serialPrintln("Other player's result received");
-                
+
                 //Stop timer of LED_STATUS and turn LED off
                 TA1CTL = 0;        // stop timer
                 TA1CCTL0 &= ~CCIFG;
@@ -567,7 +567,7 @@ int main(void)
                 for (i = 0; i<6; i++){
                     __delay_cycles(500000);
                 }
-                
+
                 turnOffLeds();
                 //Turn on timer for status LED again
                 TA1CCR0  = 62500 - 1;
@@ -579,5 +579,4 @@ int main(void)
         serialPrintln("A new game will start now...");
     }
 }
-
 
