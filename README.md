@@ -1,7 +1,6 @@
 # masterMind
-Final Project for a Microcontroller course.
-
 Implementation of the game Master Mind.
+Final Project for a Microcontroller course.
 
 ## Hardware used:
 Two PCB boards with the MSP430 as microcontroller in addition to several other interfaces including shift registers, buzzers, buttons and LEDs.
