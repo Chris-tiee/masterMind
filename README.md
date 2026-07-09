@@ -1,5 +1,6 @@
 # masterMind
 Implementation of the game Master Mind.
+
 Final Project for a Microcontroller course.
 
 ## Hardware used:
